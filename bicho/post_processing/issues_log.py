@@ -30,11 +30,11 @@ import traceback
 
 from BeautifulSoup import BeautifulSoup
 from BeautifulSoup import Comment as BFComment
-from Bicho.backends import Backend
-from Bicho.Config import Config
-from Bicho.utils import printerr, printdbg, printout
-from Bicho.common import Tracker, People, Issue, Comment, Change
-from Bicho.db.database import DBIssue, DBBackend, get_database, DBTracker,\
+from bicho.backends import Backend
+from bicho.config import Config
+from bicho.utils import printerr, printdbg, printout
+from bicho.common import Tracker, People, Issue, Comment, Change
+from bicho.db.database import DBIssue, DBBackend, get_database, DBTracker,\
      DBPeople
 from storm.locals import DateTime, Int, Reference, Unicode, Desc, Store, \
      create_database
@@ -43,8 +43,6 @@ import xml.sax.handler
 
 from dateutil.parser import parse
 from datetime import datetime
-
-from Bicho.Config import Config
 
 
 class DBIssuesLog(object):
@@ -66,6 +64,7 @@ class DBIssuesLog(object):
     date = DateTime()
     assigned_to = Int()
     tracker_id = Int()
+    change_id = Int()
 
     tracker = Reference(tracker_id, DBTracker.id)
     submitted = Reference(submitted_by, DBPeople.id)
@@ -107,24 +106,22 @@ class IssuesLog():
     def _drop_db(self):
         self.store.execute(self._get_sql_drop())
 
-    def _get_people_id(self, email, tracker_id):
+    def _get_people_id(self, email):
         """
         Gets the id of an user
         """
         try:
-            p = self.store.find(DBPeople, DBPeople.email == email,
-                                DBPeople.tracker_id == tracker_id).one()
+            p = self.store.find(DBPeople, DBPeople.email == email).one()
             return p.id
         except (AttributeError, NotOneError):
-            p = self.store.find(DBPeople, DBPeople.user_id == email,
-                                DBPeople.tracker_id == tracker_id).one()
+            p = self.store.find(DBPeople, DBPeople.user_id == email).one()
             try:
                 return p.id
             except AttributeError:
                 # no person was found in People with the email above, so
                 # we include it
                 printdbg("Person not found. Inserted with email %s " % (email))
-                dp = DBPeople(email, tracker_id)
+                dp = DBPeople(email)
                 self.store.add(dp)
                 self.store.commit()
                 return dp.id
@@ -155,12 +152,14 @@ class IssuesLog():
         """
         raise NotImplementedError
 
+    # TODO: reuse _copy_standard_values
     def _copy_issue(self, db_ilog):
         """
         This method returns a copy of the DB*Log object
         """
         aux = self._get_dbissues_object(db_ilog.issue, db_ilog.tracker_id)
         aux.issue_id = db_ilog.issue_id
+        aux.change_id = db_ilog.change_id        
         aux.type = db_ilog.type
         aux.summary = db_ilog.summary
         aux.description = db_ilog.description
@@ -194,6 +193,8 @@ class IssuesLog():
                 % (db_ilog.issue_id, f[0]))
             for v in values:
                 db_ilog = self._assign_values(db_ilog, f[0], v[0])
+	        # Initial status does not have a real change
+            db_ilog.change_id = 0
         return db_ilog
 
     def _get_dbissues_object(self, issue_name, tracker_id):
@@ -225,15 +226,27 @@ class IssuesLog():
         raise NotImplementedError
 
     def _get_changes(self, issue_id):
-        aux = self.store.execute("SELECT field, new_value, changed_by, \
+        aux = self.store.execute("SELECT id, field, new_value, changed_by, \
         changed_on FROM changes where issue_id=%s" % (issue_id))
-        return aux  
+        return aux
+
+    def _post_history(self, issue_id):
+        """
+        Abstract method for inserting extra data usign full issue history
+        """
+        pass
 
     def run(self):
+        ndone = 0
         issues = self.store.find(DBIssue)
+        total = str(issues.count())
+        print ("[IssuesLog] Total issues to analyze: " + str(issues.count()))
         for i in issues:
+            if (ndone % 1000 == 0):
+                print ("[IssuesLog] Analyzed " + str(ndone) + "/" + str(total))
             db_ilog = self._get_dbissues_object(i.issue, i.tracker_id)
             db_ilog = self._copy_standard_values(i, db_ilog)
+            final_status = db_ilog.status
 
             db_ilog = self._build_initial_state(db_ilog)
 
@@ -242,15 +255,18 @@ class IssuesLog():
 
             # the code below gets all the changes and insert a row per change
             changes = self._get_changes(db_ilog.issue_id)
-            
+
             for ch in changes:
-                field = ch[0]
-                new_value = ch[1]
-                changed_by = ch[2]
-                date = ch[3]
+                change_id = ch[0]
+                field = ch[1]
+                new_value = ch[2]
+                changed_by = ch[3]
+                date = ch[4]
                 # we need a new object to be inserted in the database
                 db_ilog = self._copy_issue(db_ilog)
                 db_ilog.date = date
+                db_ilog.change_id = change_id
+                db_ilog.submitted_by = changed_by
                 db_ilog = self._assign_values(db_ilog, field, new_value)
 
                 try:
@@ -259,5 +275,7 @@ class IssuesLog():
                 except:
                     # self.store.rollback() # is this useful in this context?
                     traceback.print_exc()
+            ##self._post_history(db_ilog, final_status)
             self.store.commit()
+            ndone += 1
         self._print_final_msg()

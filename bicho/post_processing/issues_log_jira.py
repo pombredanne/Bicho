@@ -19,13 +19,14 @@
 #
 #
 
-from Bicho.post_processing import IssueLogger
+from bicho.post_processing import IssueLogger
 from issues_log import *
 
 __sql_drop__ = 'DROP TABLE IF EXISTS issues_log_jira;'
 
 __sql_table__ = 'CREATE TABLE IF NOT EXISTS issues_log_jira ( \
                      id INTEGER NOT NULL AUTO_INCREMENT, \
+                     change_id INTEGER NOT NULL, \
                      tracker_id INTEGER NOT NULL, \
                      issue_id INTEGER NOT NULL, \
                      issue VARCHAR(255) NOT NULL, \
@@ -68,6 +69,10 @@ __sql_table__ = 'CREATE TABLE IF NOT EXISTS issues_log_jira ( \
                          ON UPDATE CASCADE, \
                      FOREIGN KEY(tracker_id) \
                        REFERENCES trackers(id) \
+                         ON DELETE CASCADE \
+                         ON UPDATE CASCADE, \
+                     FOREIGN KEY(change_id) \
+                       REFERENCES changes(id) \
                          ON DELETE CASCADE \
                          ON UPDATE CASCADE \
                      ) ENGINE=MYISAM;'
@@ -134,8 +139,7 @@ class JiraIssuesLog(IssuesLog):
             elif table_field == 'type':
                 db_ilog.type = value
             elif table_field == 'assigned_to':
-                db_ilog.assigned_to = self._get_people_id(value,
-                    self._get_tracker_id(db_ilog.issue_id))
+                db_ilog.assigned_to = self._get_people_id(value)
             elif table_field == 'status':
                 db_ilog.status = value
             elif table_field == 'resolution':

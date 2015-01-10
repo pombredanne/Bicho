@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (C) 2012 GSyC/LibreSoft, Universidad Rey Juan Carlos
+# Copyright (C) 2012-2013 GSyC/LibreSoft, Universidad Rey Juan Carlos
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -24,20 +24,19 @@ import pwd
 
 from launchpadlib.launchpad import Launchpad
 from launchpadlib.credentials import Credentials
+from launchpadlib.errors import NotFound
 
-from Bicho.backends import Backend
-from Bicho.Config import Config
-from Bicho.utils import printerr, printdbg, printout
-from Bicho.common import Tracker, People, Issue, Comment, Change, TempRelationship, Attachment
-from Bicho.db.database import DBIssue, DBBackend, get_database, NotFoundError
+from bicho.backends import Backend
+from bicho.config import Config
+from bicho.utils import printerr, printdbg, printout
+from bicho.common import Tracker, People, Issue, Comment, Change, TempRelationship, Attachment
+from bicho.db.database import DBIssue, DBBackend, DBTracker, DBIssue, get_database, NotFoundError
 
 from storm.locals import DateTime, Int, Reference, Unicode, Desc
 from datetime import datetime
 from dateutil.parser import parse  # used to convert str time to datetime
 
 from tempfile import mkdtemp
-
-from lazr.restfulclient.errors import HTTPError
 
 
 class DBLaunchpadIssueExt(object):
@@ -96,7 +95,7 @@ class DBLaunchpadIssueExtMySQL(DBLaunchpadIssueExt):
                      status VARCHAR(32) default NULL, \
                      issue_id INTEGER NOT NULL, \
                      description TEXT default NULL, \
-                     web_link VARCHAR(32) default NULL, \
+                     web_link VARCHAR(256) default NULL, \
                      bug_target_display_name VARCHAR(32) default NULL, \
                      bug_target_name VARCHAR(32) default NULL, \
                      date_assigned DATETIME default NULL, \
@@ -117,13 +116,13 @@ class DBLaunchpadIssueExtMySQL(DBLaunchpadIssueExt):
                      milestone_name VARCHAR(32) default NULL, \
                      milestone_summary VARCHAR(32) default NULL, \
                      milestone_title VARCHAR(32) default NULL, \
-                     milestone_web_link VARCHAR(32) default NULL, \
+                     milestone_web_link VARCHAR(256) default NULL, \
                      heat INTEGER UNSIGNED default NULL, \
                      linked_branches VARCHAR(32) default NULL, \
                      tags VARCHAR(32) default NULL, \
                      title VARCHAR(32) default NULL, \
                      users_affected_count INTEGER UNSIGNED default NULL, \
-                     web_link_standalone VARCHAR(32) default NULL, \
+                     web_link_standalone VARCHAR(256) default NULL, \
                      PRIMARY KEY(id), \
                      UNIQUE KEY(issue_id), \
                      INDEX ext_issue_idx(issue_id), \
@@ -136,7 +135,7 @@ class DBLaunchpadIssueExtMySQL(DBLaunchpadIssueExt):
 
 class DBLaunchpadBackend(DBBackend):
     """
-    Adapter for Bugzilla backend.
+    Adapter for Launchpad backend.
     """
     def __init__(self):
         self.MYSQL_EXT = [DBLaunchpadIssueExtMySQL]
@@ -212,7 +211,7 @@ class DBLaunchpadBackend(DBBackend):
             db_issue_ext.web_link_standalone = self.__return_unicode(
                 issue.web_link_standalone)
 
-            if newIssue == True:
+            if newIssue is True:
                 store.add(db_issue_ext)
 
             store.flush()
@@ -263,7 +262,7 @@ class DBLaunchpadBackend(DBBackend):
         """
         pass
 
-    def get_last_modification_date(self, store):
+    def get_last_modification_date(self, store, trk_id):
         # get last modification date stored in the database for a given status
         # select date_last_updated as date from issues_ext_github order by date
         # desc limit 1;
@@ -272,7 +271,17 @@ class DBLaunchpadBackend(DBBackend):
         #state=closed&per_page=100&sort=updated&direction=asc&
         #since=2012-05-28T21:11:28Z
 
-        result = store.find(DBLaunchpadIssueExt)
+        # FIXME: the commented code is specific of tracker. In the case of meta-trackers
+        # such as the one used in OpenStack (tracker that contains other trackers), that tracker
+        # is always empty and the process starts from the very beginning. 
+        # In order to avoid this, the date_last_updated is independent of the tracker.
+        # This change may face other issues in the future. An example of this is 
+        # when using in the same database two different trackers from Launchpad.
+        # So this code works when having meta-trackers (the type of trackers we're using so far)
+        result = store.find(DBLaunchpadIssueExt) #,
+                            #DBLaunchpadIssueExt.issue_id == DBIssue.id,
+                            #DBIssue.tracker_id == DBTracker.id,
+                            #DBTracker.id == trk_id)
         aux = result.order_by(Desc(DBLaunchpadIssueExt.date_last_updated))[:1]
 
         for entry in aux:
@@ -710,12 +719,16 @@ class LPBackend(Backend):
         """
         Returns Bicho People object from Launchpad person object
         """
-        p = People(lpperson.name)
-        p.set_name(lpperson.display_name)
-        if lpperson.confirmed_email_addresses:
-            for m in lpperson.confirmed_email_addresses:
-                p.set_email(m.email)
-                break
+        try:
+            p = People(lpperson.name)
+            p.set_name(lpperson.display_name)
+            if lpperson.confirmed_email_addresses:
+                for m in lpperson.confirmed_email_addresses:
+                    p.set_email(m.email)
+                    break
+        except Exception, e:
+            printerr(str(e))
+            p = People("unknown")
         return p
 
     def analyze_bug(self, bug):
@@ -836,12 +849,15 @@ class LPBackend(Backend):
             issue.set_milestone_title(bug.milestone.title)
             issue.set_milestone_web_link(bug.milestone.web_link)
 
-        if bug.bug.duplicate_of:
-            temp_rel = TempRelationship(bug.bug.id,
-                                        unicode('duplicate_of'),
-                                        unicode(bug.bug.duplicate_of.id))
-            issue.add_temp_relationship(temp_rel)
-            
+        try:
+            if bug.bug.duplicate_of:
+                temp_rel = TempRelationship(bug.bug.id,
+                                            unicode('duplicate_of'),
+                                            unicode(bug.bug.duplicate_of.id))
+                issue.add_temp_relationship(temp_rel)
+        except NotFound:
+            printdbg("Issue %s is a duplicate of a private issue. Ignoring the private issue." % issue.issue)
+
         issue.set_heat(bug.bug.heat)
         issue.set_linked_branches(bug.bug.linked_branches)
 
@@ -880,7 +896,7 @@ class LPBackend(Backend):
 
             # author and date are stored in the comment object
             aux = a['message_link']
-            comment_id = int(aux[aux.rfind('/')+1:])
+            comment_id = int(aux[aux.rfind('/') + 1:])
             comment = bug.bug.messages[comment_id]
             a_by = self._get_person(comment.owner)
             a_on = self.__drop_timezone(comment.date_created)
@@ -899,7 +915,7 @@ class LPBackend(Backend):
         return self.__drop_timezone(parse(str))
 
     def __drop_timezone(self, dt):
-        # drop the timezone from the datetime objetct
+        # drop the timezone from the datetime object
         # MySQL doesn't support timezone, we remove it
 
         if dt.isoformat().rfind('+') > 0:
@@ -932,7 +948,7 @@ class LPBackend(Backend):
             url = url[:-1]
 
         if (url.rfind('://bugs.launchpad.net') >= 0) or \
-               (url.rfind('://launchpad.net') >= 0):
+                (url.rfind('://launchpad.net') >= 0):
             project_name = url[url.rfind('/') + 1:]
 
         return project_name
@@ -962,8 +978,8 @@ class LPBackend(Backend):
         if not os.path.exists(cachedir):
             os.makedirs(cachedir)
         cre_file = os.path.join(cachedir + 'launchpad-credential')
-        self.lp = Launchpad.login_with('Bicho','production',
-                                       credentials_file = cre_file)
+        self.lp = Launchpad.login_with('Bicho', 'production',
+                                       credentials_file=cre_file)
 
         aux_status = ["New", "Incomplete", "Opinion", "Invalid", "Won't Fix",
                       "Expired", "Confirmed", "Triaged", "In Progress",
@@ -971,7 +987,12 @@ class LPBackend(Backend):
                       "Incomplete (with response)",
                       "Incomplete (without response)"]
 
-        last_mod_date = bugsdb.get_last_modification_date()
+        # still useless
+        bugsdb.insert_supported_traker("launchpad", "x.x")
+        trk = Tracker(url, "launchpad", "x.x")
+        dbtrk = bugsdb.insert_tracker(trk)
+
+        last_mod_date = bugsdb.get_last_modification_date(tracker_id=dbtrk.id)
 
         if last_mod_date:
             bugs = self.lp.projects[pname].searchTasks(status=aux_status,
@@ -986,12 +1007,6 @@ class LPBackend(Backend):
 
         nbugs = len(bugs)
 
-        # still useless
-        bugsdb.insert_supported_traker("launchpad", "x.x")
-        trk = Tracker(url, "launchpad", "x.x")
-        dbtrk = bugsdb.insert_tracker(trk)
-        #
-
         if nbugs == 0:
             printout("No bugs found. Did you provide the correct url?")
             sys.exit(0)
@@ -1001,7 +1016,7 @@ class LPBackend(Backend):
         for bug in bugs:
 
             if bug.web_link in analyzed:
-                continue   #for the bizarre error #338
+                continue  # for the bizarre error #338
 
             try:
                 issue_data = self.analyze_bug(bug)
@@ -1021,7 +1036,7 @@ class LPBackend(Backend):
                 bugsdb.insert_issue(issue_data, dbtrk.id)
             except UnicodeEncodeError:
                 printerr("UnicodeEncodeError: the issue %s couldn't be stored"
-                      % (issue_data.issue))
+                         % (issue_data.issue))
             except NotFoundError:
                 printerr("NotFoundError: the issue %s couldn't be stored"
                          % (issue_data.issue))

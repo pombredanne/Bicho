@@ -29,8 +29,8 @@ import datetime
 from storm.exceptions import IntegrityError # DatabaseError,
 from storm.locals import DateTime, Int, Reference, Unicode
 
-from Bicho.utils import printdbg
-from Bicho.Config import Config
+from bicho.utils import printdbg
+from bicho.config import Config
 
 
 class NotFoundError(Exception):
@@ -59,8 +59,8 @@ class DBDatabase:
         """
         Create the database tables.
 
-        SQL query with the structure of each table is stored into 
-        X{__sql_table__} attribute of database classes. 
+        SQL query with the structure of each table is stored into
+        X{__sql_table__} attribute of database classes.
 
         @param clsl: a list of database classes
         @type clsl: C{list} of L{object}
@@ -165,10 +165,10 @@ class DBDatabase:
             db_issue.resolution = unicode(issue.resolution)
             db_issue.priority = unicode(issue.priority)
             db_issue.submitted_by = self.insert_people(issue.submitted_by).id
-            
+
 
             db_issue.submitted_on = issue.submitted_on
-            
+
             if issue.assigned_to is not None:
                 db_issue.assigned_to = self.insert_people(issue.assigned_to).id
 
@@ -230,7 +230,7 @@ class DBDatabase:
             self.store.rollback()
             raise
 
-    def get_last_modification_date(self, state = None):
+    def get_last_modification_date(self, state=None, tracker_id=None):
         """
         Return last modification date stored in database
         """
@@ -238,9 +238,9 @@ class DBDatabase:
             # in the github backend we need to get both open and closed
             # issues in two different petitions
             if state:
-                return self.backend.get_last_modification_date(self.store, state)
+                return self.backend.get_last_modification_date(self.store, state, tracker_id)
             else:
-                return self.backend.get_last_modification_date(self.store)
+                return self.backend.get_last_modification_date(self.store, tracker_id)
 
     def _insert_relationship(self, issue_id, type, rel_id):
         """
@@ -322,7 +322,7 @@ class DBDatabase:
 
         @param attachment: attachment to insert
         @type attachment: L{Attachment}
-        @param issue_id: issue identifier 
+        @param issue_id: issue identifier
         @type issue_id: C{int}
         @param tracker_id: identifier of the tracker
         @type tracker_id: C{int}
@@ -337,7 +337,7 @@ class DBDatabase:
             submitted_by = None
 
         db_attachment = DBAttachment(attachment.name, attachment.description,
-                                     attachment.url, submitted_by, 
+                                     attachment.url, submitted_by,
                                      attachment.submitted_on, issue_id)
         self.store.add(db_attachment)
         self.store.flush()
@@ -349,7 +349,7 @@ class DBDatabase:
 
         @param change: change to insert
         @type change: L{Change}
-        @param issue_id: issue identifier 
+        @param issue_id: issue identifier
         @type issue_id: C{int}
         @param tracker_id: identifier of the tracker
         @type tracker_id: C{int}
@@ -359,7 +359,7 @@ class DBDatabase:
         """
         changed_by = self.insert_people(change.changed_by)
 
-        db_change = DBChange(change.field, change.old_value, change.new_value, 
+        db_change = DBChange(change.field, change.old_value, change.new_value,
                              changed_by.id, change.changed_on, issue_id)
         self.store.add(db_change)
         self.store.flush()
@@ -438,9 +438,9 @@ class DBDatabase:
                                         DBPeople.user_id == unicode(user_id)).one()
         except Exception, e:
             print e
-            
+
         if not db_people:
-            raise NotFoundError('Idenitity %s not found in tracker %s' % 
+            raise NotFoundError('Idenitity %s not found in tracker %s' %
                                 (user_id, tracker_id))
         return db_people
 
@@ -480,9 +480,10 @@ class DBDatabase:
 
         """
         db_comment = self.store.find(DBComment,
-                                    DBComment.issue_id == issue_id,
-                                    DBComment.text == comment.comment,
-                                    DBComment.submitted_on == comment.submitted_on).one()
+                                     DBComment.issue_id == issue_id,
+                                     DBComment.text == unicode(comment.comment),
+                                     DBComment.submitted_on == comment.submitted_on).one()
+
         if not db_comment:
             #if comment is not stored, return -1 to know it's a new one
             db_comment = -1
@@ -495,7 +496,7 @@ class DBDatabase:
 
         @param change: change to insert
         @type change: L{Change}
-        @param issue_id: issue identifier 
+        @param issue_id: issue identifier
         @type issue_id: C{int}
         @param tracker_id: identifier of the tracker
         @type tracker_id: C{int}
@@ -524,7 +525,7 @@ class DBDatabase:
 
         @param attachment: attachment to insert
         @type attachment: L{Attachment}
-        @param issue_id: issue identifier 
+        @param issue_id: issue identifier
         @type issue_id: C{int}
         @param tracker_id: identifier of the tracker
         @type tracker_id: C{int}
@@ -552,7 +553,7 @@ class DBDatabase:
         if not db_temp_rel:
             db_temp_rel = -1
 
-        return db_temp_rel                                      
+        return db_temp_rel
 
 
 class DBSupportedTracker(object):
@@ -644,7 +645,7 @@ class DBPeople(object):
     @ivar user_id: Identity identifier used in the tracker.
     @type user_id: L{storm.locals.Unicode}
     @ivar tracker_id: Identifier of the tracker.
-    @type tracker_id: L{storm.locals.Int} 
+    @type tracker_id: L{storm.locals.Int}
     @ivar tracker: Reference to {DBTracker} object.
     @type tracker: L{storm.locals.Reference}
     """
@@ -691,7 +692,7 @@ class DBIssue(object):
 
     @ivar id: Database issue identifier.
     @type id: L{storm.locals.Int}
-    @ivar issue: Issue identifier. 
+    @ivar issue: Issue identifier.
     @type issue: L{storm.locals.Unicode}
     @ivar type: Type of the issue.
     @type type: L{storm.locals.Unicode}
@@ -781,7 +782,7 @@ class DBIssueRelationship(object):
     @type related_to: L{storm.locals.Int}
     @ivar type: Type of the relationship.
     @type type: L{storm.locals.Unicode}
-    @ivar issue_id: Issue identifier. 
+    @ivar issue_id: Issue identifier.
     @type issue_id: L{storm.locals.Int}
     @ivar issue: Reference to L{DBIssue} object.
     @type issue: L{storm.locals.Reference}
@@ -825,7 +826,7 @@ class DBIssueTempRelationship(object):
     @type related_to: L{storm.locals.Int}
     @ivar type: Type of the relationship.
     @type type: L{storm.locals.Unicode}
-    @ivar issue_id: Issue identifier. 
+    @ivar issue_id: Issue identifier.
     @type issue_id: L{storm.locals.Int}
     @ivar issue: Reference to L{DBIssue} object.
     @type issue: L{storm.locals.Reference}
@@ -918,11 +919,11 @@ class DBAttachment(object):
 
     @ivar id: Attachment identifier.
     @type id: L{storm.locals.Int}
-    @ivar name: Name of the attachment. 
+    @ivar name: Name of the attachment.
     @type name: L{storm.locals.Unicode}
-    @ivar description: Description of the attachment. 
+    @ivar description: Description of the attachment.
     @type description: L{storm.locals.Unicode}
-    @ivar url: URL of the attachment. 
+    @ivar url: URL of the attachment.
     @type url: L{storm.locals.Unicode}
     @ivar submitted_by: Identifier of the submitter.
     @type submitted_by: L{storm.locals.Int}
@@ -933,7 +934,7 @@ class DBAttachment(object):
     @ivar issue: Reference to L{DBIssue} object.
     @type issue: L{storm.locals.Reference}
     @ivar submitted: Reference to L{DBPeople} object.
-    @type submitted: L{storm.locals.Reference}   
+    @type submitted: L{storm.locals.Reference}
     """
     __storm_table__ = 'attachments'
 
@@ -979,11 +980,11 @@ class DBChange(object):
 
     @ivar id: Change identifier.
     @type id: L{storm.locals.Int}
-    @ivar field: Field that was changed. 
+    @ivar field: Field that was changed.
     @type field: L{storm.locals.Unicode}
-    @ivar old_value: Old field value. 
+    @ivar old_value: Old field value.
     @type old_value: L{storm.locals.Unicode}
-    @ivar new_value: New field value. 
+    @ivar new_value: New field value.
     @type new_value: L{storm.locals.Unicode}
     @ivar changed_by: Identifier of the user that made the change.
     @type changed_by: L{storm.locals.Int}
@@ -994,7 +995,7 @@ class DBChange(object):
     @ivar issue: Reference to L{DBIssue} object.
     @type issue: L{storm.locals.Reference}
     @ivar people: Reference to L{DBPeople} object.
-    @type people: L{storm.locals.Reference}   
+    @type people: L{storm.locals.Reference}
     """
     __storm_table__ = 'changes'
 
@@ -1063,6 +1064,5 @@ def get_database(backend=None):
         opts = Config()
 
     if opts.db_driver_out == "mysql":
-        from Bicho.db.mysql import DBMySQL
+        from bicho.db.mysql import DBMySQL
         return DBMySQL(backend)
-    

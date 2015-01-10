@@ -19,13 +19,14 @@
 #
 #
 
-from Bicho.post_processing import IssueLogger
+from bicho.post_processing import IssueLogger
 from issues_log import *
 
 __sql_drop__ = 'DROP TABLE IF EXISTS issues_log_bugzilla;'
 
 __sql_table__ = 'CREATE TABLE IF NOT EXISTS issues_log_bugzilla ( \
                      id INTEGER NOT NULL AUTO_INCREMENT, \
+                     change_id INTEGER NOT NULL, \
                      tracker_id INTEGER NOT NULL, \
                      issue_id INTEGER NOT NULL, \
                      issue VARCHAR(255) NOT NULL, \
@@ -61,7 +62,7 @@ __sql_table__ = 'CREATE TABLE IF NOT EXISTS issues_log_bugzilla ( \
                      deadline DATETIME default NULL, \
                      keywords VARCHAR(32) default NULL, \
                      flag VARCHAR(32) default NULL, \
-                     cc VARCHAR(32) default NULL, \
+                     cc VARCHAR(64) default NULL, \
                      group_bugzilla VARCHAR(32) default NULL, \
                      url VARCHAR(255) default NULL, \
                      PRIMARY KEY(id), \
@@ -79,6 +80,10 @@ __sql_table__ = 'CREATE TABLE IF NOT EXISTS issues_log_bugzilla ( \
                          ON UPDATE CASCADE, \
                      FOREIGN KEY(tracker_id) \
                        REFERENCES trackers(id) \
+                         ON DELETE CASCADE \
+                         ON UPDATE CASCADE, \
+                     FOREIGN KEY(change_id) \
+                       REFERENCES changes(id) \
                          ON DELETE CASCADE \
                          ON UPDATE CASCADE \
                      ) ENGINE=MYISAM;'
@@ -154,8 +159,7 @@ class BugzillaIssuesLog(IssuesLog):
             elif table_field == 'priority':
                 db_ilog.priority = value
             elif table_field == 'assigned_to':
-                db_ilog.assigned_to = self._get_people_id(
-                    value, self._get_tracker_id(db_ilog.issue_id))
+                db_ilog.assigned_to = self._get_people_id(value)
             elif table_field == 'status':
                 db_ilog.status = value
             elif table_field == 'resolution':

@@ -30,13 +30,13 @@ import traceback
 
 from BeautifulSoup import BeautifulSoup
 from BeautifulSoup import Comment as BFComment
-from Bicho.backends import Backend
-from Bicho.backends.bg import DBBugzillaIssueExt
-from Bicho.backends.jira import DBJiraIssueExt
-from Bicho.Config import Config
-from Bicho.utils import printerr, printdbg, printout
-from Bicho.common import Tracker, People, Issue, Comment, Change
-from Bicho.db.database import DBIssue, DBBackend, get_database, DBTracker, \
+from bicho.backends import Backend
+from bicho.backends.bg import DBBugzillaIssueExt
+from bicho.backends.jira import DBJiraIssueExt
+from bicho.config import Config
+from bicho.utils import printerr, printdbg, printout
+from bicho.common import Tracker, People, Issue, Comment, Change
+from bicho.db.database import DBIssue, DBBackend, get_database, DBTracker, \
      DBPeople, DBChange
 
 from storm.locals import DateTime, Int, Reference, Unicode, Desc, Asc, Store, \
@@ -47,7 +47,6 @@ import xml.sax.handler
 from dateutil.parser import parse
 from datetime import datetime
 
-from Bicho.Config import Config
 
 __sql_table_bugzilla__ = 'CREATE TABLE IF NOT EXISTS issues_log_bugzilla ( \
                      id INTEGER NOT NULL AUTO_INCREMENT, \
@@ -447,7 +446,7 @@ class IssuesLog():
         db_ilog = None
         if self.backend_is_jira():
             rows = self.store.find(DBJiraIssuesLog,
-                                   DBJiraIssuesLog.issue_id==issue_id)
+                                   DBJiraIssuesLog.issue_id == issue_id)
             lrow = rows.order_by(Desc(DBJiraIssuesLog.id))[:1]
             for aux in lrow:  # FIXME it only contains an element!
                 db_ilog = DBJiraIssuesLog(aux.issue, aux.tracker_id)
@@ -474,7 +473,7 @@ class IssuesLog():
                 db_ilog.project_key = aux.project_key
         else:  # elif self.backend_is_bugzilla():
             rows = self.store.find(DBBugzillaIssuesLog,
-                                   DBBugzillaIssuesLog.issue_id==issue_id)
+                                   DBBugzillaIssuesLog.issue_id == issue_id)
             lrow = rows.order_by(Desc(DBBugzillaIssuesLog.id))[:1]
             for aux in lrow:  # FIXME it only contains an element!
                 db_ilog = DBBugzillaIssuesLog(aux.issue, aux.tracker_id)

@@ -22,8 +22,9 @@ import glob
 
 __all__ = ['Backend']
 
+
 class BackendUnknownError (Exception):
-    '''Unkown engine type'''
+    '''Unknown engine type'''
 
 
 class Backend:
@@ -31,33 +32,33 @@ class Backend:
     _backends = {}
 
     @staticmethod
-    def register_backend (backend_name, backend_class):
+    def register_backend(backend_name, backend_class):
         Backend._backends[backend_name] = backend_class
 
     @staticmethod
-    def _get_backend (backend_name):
+    def _get_backend(backend_name):
         if backend_name not in Backend._backends:
             try:
-                __import__ ('Bicho.backends.%s' % backend_name)
+                __import__('bicho.backends.%s' % backend_name)
             except ImportError:
                 raise
 
         if backend_name not in Backend._backends:
-            raise BackendUnknownError ('Backend type %s not registered' % backend_name)
-    
+            raise BackendUnknownError('Backend type %s not registered' % backend_name)
+
         return Backend._backends[backend_name]
-    
+
     @staticmethod
-    def create_backend (backend_name):
-        backend_class = Backend._get_backend (backend_name)
-        return backend_class ()
-    
+    def create_backend(backend_name):
+        backend_class = Backend._get_backend(backend_name)
+        return backend_class()
+
     @staticmethod
-    def get_all_backends ():
+    def get_all_backends():
         # we should clean this directory
         backends = []
-        not_backends = ('HTMLParser.py', 'HTMLUtils.py', '__init__.py')
-        for fname in glob.glob( os.path.join(os.path.dirname(__file__), '*.py') ):
+        not_backends = ('__init__.py')
+        for fname in glob.glob(os.path.join(os.path.dirname(__file__), '*.py')):
             if os.path.basename(fname) not in not_backends:
                 backends.append(os.path.basename(fname))
         return backends
