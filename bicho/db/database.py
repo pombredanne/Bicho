@@ -147,7 +147,7 @@ class DBDatabase:
         @rtype: L{DBIssue}
         """
 
-        newIssue = False;
+        newIssue = False
 
         try:
             db_issue = self._get_db_issue(issue.issue, tracker_id)
@@ -171,6 +171,8 @@ class DBDatabase:
 
             if issue.assigned_to is not None:
                 db_issue.assigned_to = self.insert_people(issue.assigned_to).id
+            else:
+                db_issue.assigned_to = 0
 
             #if issue is new, we add to the data base before the flush()
             if newIssue == True:
@@ -215,6 +217,9 @@ class DBDatabase:
                         self.backend.insert_change_ext(self.store, change, db_change.id)
 
             # Insert CC/watchers
+            # Remove old watchers
+            self._remove_issues_watchers(db_issue.id, tracker_id)
+
             for person in issue.watchers:
                 try:
                     #db_issues_watchers = self._insert_issues_watchers(person, db_issue.id,
@@ -286,7 +291,10 @@ class DBDatabase:
             aux_issue_id = self._get_db_issue(tr.issue_id, tr.tracker_id)
             aux_related_to = self._get_db_issue(tr.related_to, tr.tracker_id)
             if (aux_related_to != -1 and aux_issue_id != -1):
-                self._insert_relationship(aux_issue_id.id, tr.type, aux_related_to.id)
+                db_rel = self._get_db_rel(aux_issue_id.id, tr.type, aux_related_to.id)
+
+                if db_rel == -1:
+                    self._insert_relationship(aux_issue_id.id, tr.type, aux_related_to.id)
             else:
                 printdbg("Issue %s belongs to a different tracker and won't be stored" % tr.related_to)
 
@@ -357,10 +365,14 @@ class DBDatabase:
         @return: the inserted change
         @rtype: L{DBChange}
         """
-        changed_by = self.insert_people(change.changed_by)
+        if not change.changed_by:
+            changed_by_id = -1
+        else:
+            changed_by = self.insert_people(change.changed_by)
+            changed_by_id = changed_by.id
 
         db_change = DBChange(change.field, change.old_value, change.new_value,
-                             changed_by.id, change.changed_on, issue_id)
+                             changed_by_id, change.changed_on, issue_id)
         self.store.add(db_change)
         self.store.flush()
         return db_change
@@ -369,8 +381,8 @@ class DBDatabase:
         """
         Insert watchers for the issue X{issue_id}
 
-        @return: the inserted comment
-        @rtype: L{DBComment}
+        @return: the inserted watcher
+        @rtype: L{DBIssuesWatchers}
         """
         watcher = self.insert_people(people)
 
@@ -379,6 +391,16 @@ class DBDatabase:
         self.store.add(db_issues_watchers)
         self.store.flush()
         return db_issues_watchers
+
+    def _remove_issues_watchers(self, issue_id, tracker_id):
+        """
+        Remove watchers from the issue X{issue_id}
+        """
+        result = self._get_db_watchers(issue_id, tracker_id)
+
+        for r in result:
+            self.store.remove(r)
+        self.store.flush()
 
     def _get_db_supported_tracker(self, name, version):
         """
@@ -541,6 +563,19 @@ class DBDatabase:
 
         return db_attachment
 
+    def _get_db_watchers(self, issue_id, tracker_id):
+        """
+        Look for the watchers of the issue X{issue_id}
+
+        @param issue_id: issue identifier
+        @type issue_id: C{int}
+        @param tracker_id: identifier of the tracker
+        @type tracker_id: C{int}
+        """
+        db_watchers = self.store.find(DBIssuesWatchers,
+                                      DBIssuesWatchers.issue_id == issue_id)
+        return db_watchers
+
     def _get_db_temp_rel(self, t_relationship, issue_id):
         """
         """
@@ -554,6 +589,20 @@ class DBDatabase:
             db_temp_rel = -1
 
         return db_temp_rel
+
+    def _get_db_rel(self, issue_id, type, related_to):
+        """
+        """
+        #DBIssueRelationship
+        db_rel = self.store.find(DBIssueRelationship,
+                                 DBIssueRelationship.issue_id == issue_id,
+                                 DBIssueRelationship.type == type,
+                                 DBIssueRelationship.related_to == related_to).one()
+
+        if not db_rel:
+            db_rel = -1
+
+        return db_rel
 
 
 class DBSupportedTracker(object):

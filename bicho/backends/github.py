@@ -39,6 +39,7 @@ from lazr.restfulclient.errors import HTTPError
 
 CLOSED_STATE = "closed"
 OPEN_STATE = "open"
+ALL_STATES = "all"
 
 
 class DBGithubIssueExt(object):
@@ -101,7 +102,7 @@ class DBGithubBackend(DBBackend):
     def __init__(self):
         self.MYSQL_EXT = [DBGithubIssueExtMySQL]
 
-    def get_last_modification_date(self, store, bugs_state, tracker_id):
+    def get_last_modification_date(self, store, tracker_id):
         # get last modification date stored in the database for a given status
         # select date_last_updated as date from issues_ext_github order by date
         # desc limit 1;
@@ -115,19 +116,6 @@ class DBGithubBackend(DBBackend):
                             DBIssue.tracker_id == DBTracker.id,
                             DBTracker.id == tracker_id)
         #printdbg (str(Tracker(url, "github", "v3")))
-
-        if (bugs_state == OPEN_STATE):
-            result = store.find(DBGithubIssueExt,
-                                DBGithubIssueExt.status == u"open",
-                                DBGithubIssueExt.issue_id == DBIssue.id,
-                                DBIssue.tracker_id == DBTracker.id,
-                                DBTracker.id == tracker_id)
-        elif (bugs_state == CLOSED_STATE):
-            result = store.find(DBGithubIssueExt,
-                                DBGithubIssueExt.status == u"closed",
-                                DBGithubIssueExt.issue_id == DBIssue.id,
-                                DBIssue.tracker_id == DBTracker.id,
-                                DBTracker.id == tracker_id)
         aux = result.order_by(Desc(DBGithubIssueExt.updated_at))[:1]
 
         for entry in aux:
@@ -367,18 +355,32 @@ class GithubIssue(Issue):
         self.title = title
 
 
+class GitHubRateLimitReached(Exception):
+    pass
+
+
 class GithubBackend(Backend):
 
     def __init__(self):
         self.url = Config.url
         self.delay = Config.delay
-        try:
-            self.backend_password = Config.backend_password
+        self.backend_token = None
+        self.backend_user = None
+        self.backend_password = None
+        self.users = {}
+
+        if hasattr(Config, 'backend_token'):
+            self.backend_token = Config.backend_token
+        elif hasattr(Config, 'backend_user') and hasattr(Config, 'backend_password'):
             self.backend_user = Config.backend_user
-        except AttributeError:
-            printerr("\n--backend-user and --backend-password are mandatory \
-            to download bugs from Github\n")
+            self.backend_password = Config.backend_password
+        else:
+            msg = "\n--backend-user and --backend-password or --backend-token" + \
+                  " are mandatory to download bugs from Github\n"
+            printerr(msg)
             sys.exit(1)
+
+        self.newest_first = Config.newest_first
         self.remaining_ratelimit = 0
 
     def get_domain(self, url):
@@ -399,15 +401,12 @@ class GithubBackend(Backend):
             bug_type = unicode('')
         summary = bug['title']
         desc = bug['body']
-        submitted_by = People(bug['user']['login'])
-        ## FIXME send petition to bug['user']['url']
+        submitted_by = self.__get_user(bug['user']['login'])
 
         submitted_on = self.__to_datetime(bug['created_at'])
 
         if bug['assignee']:
-            assignee = People(bug['assignee']['login'])
-            ## assignee.set_name(bug.assignee.display_name)
-            ## FIXME get name from bug['assignee']['url']
+            assignee = self.__get_user(bug['assignee']['login'])
         else:
             assignee = People(unicode("nobody"))
 
@@ -437,8 +436,7 @@ class GithubBackend(Backend):
 
         comments = self.__get_batch_comments(bug['number'])
         for c in comments:
-            by = People(c['user']['login'])
-            ## by.setname() FIXME - to be done
+            by = self.__get_user(c['user']['login'])
             date = self.__to_datetime(c['created_at'])
             com = Comment(c['body'], by, date)
             issue.add_comment(com)
@@ -450,7 +448,7 @@ class GithubBackend(Backend):
             added = e['commit_id']
             removed = unicode('')
             if e['actor']:
-                by = People(e['actor']['login'])
+                by = self.__get_user(e['actor']['login'])
             else:
                 by = People(u"nobody")
             ## by.setname() FIXME - to be done
@@ -465,6 +463,17 @@ class GithubBackend(Backend):
         # MySQL doesn't support timezone, we remove it
 
         return parse(str[:-1])
+
+    def __set_request_auth(self, request):
+        if self.backend_token:
+            auth = "token %s" % self.backend_token
+        else:
+            base64string = base64.encodestring(
+                '%s:%s' % (self.backend_user,
+                           self.backend_password)).replace('\n', '')
+            auth = "Basic %s" % base64string
+
+        request.add_header("Authorization", auth)
 
     def __get_project_from_url(self):
 
@@ -483,76 +492,77 @@ class GithubBackend(Backend):
     def __get_tracker_url_from_bug(self, bug):
         return bug['url'][:bug['url'].rfind('/')]
 
+    def __fetch_data(self, url):
+        request = urllib2.Request(url)
+        self.__set_request_auth(request)
+
+        try:
+            result = urllib2.urlopen(request)
+            content = result.read()
+        except urllib2.HTTPError, e:
+            if e.code == 403:
+                raise GitHubRateLimitReached()
+            printdbg("Error raised on %s" % url)
+            raise e
+
+        self.remaining_ratelimit = result.info()['x-ratelimit-remaining']
+
+        return json.loads(content)
+
+    def __get_user(self, username):
+        if username in self.users:
+            return self.users[username]
+
+        url = "https://api.github.com/users/" + username
+        raw_user = self.__fetch_data(url)
+
+        user = People(username)
+
+        if 'name' in raw_user:
+            user.name = raw_user['name']
+        if 'email' in raw_user:
+            user.email = raw_user['email']
+
+        self.users[username] = user
+
+        return user
+
     def __get_batch_activities(self, bug_number):
         url = self.url + "/" + str(bug_number) + "/events"
-        base64string = base64.encodestring(
-            '%s:%s' % (self.backend_user,
-                       self.backend_password)).replace('\n', '')
 
-        request = urllib2.Request(url)
-        request.add_header("Authorization", "Basic %s" % base64string)
-
-        result = urllib2.urlopen(request)
-        content = result.read()
-
-        events = json.loads(content)
+        events = self.__fetch_data(url)
 
         return events
 
     def __get_batch_comments(self, bug_number):
         url = self.url + "/" + str(bug_number) + "/comments"
-        base64string = base64.encodestring(
-            '%s:%s' % (self.backend_user,
-                       self.backend_password)).replace('\n', '')
 
-        request = urllib2.Request(url)
-        request.add_header("Authorization", "Basic %s" % base64string)
-
-        result = urllib2.urlopen(request)
-        content = result.read()
-
-        comments = json.loads(content)
+        comments = self.__fetch_data(url)
 
         return comments
 
-    def __get_batch_bugs_state(self, state=OPEN_STATE, since=None):
-        if state == OPEN_STATE:
-            url = self.url + "?state=open&page=" + str(self.pagecont) \
-                + "&per_page=100&sort=updated&direction=asc"
-        else:
-            url = self.url + "?state=closed&page=" + str(self.pagecont) \
-                + "&per_page=100&sort=updated&direction=asc"
-            # we need to download both closed and open bugs,
-            #by default state = open
+    def __get_batch_bugs_state(self, state=ALL_STATES, since=None, direction='asc'):
+        url = self.url + "?state=" + state + "&page=" + str(self.pagecont) \
+            + "&per_page=100&sort=updated&direction=" + direction
 
         if since:
             url = url + "&since=" + str(since)
 
-        base64string = base64.encodestring(
-            '%s:%s' % (self.backend_user,
-                       self.backend_password)).replace('\n', '')
+        printdbg(url)
 
-        request = urllib2.Request(url)
-        request.add_header("Authorization", "Basic %s" % base64string)
-
-        result = urllib2.urlopen(request)
-        content = result.read()
-
-        self.remaining_ratelimit = result.info()['x-ratelimit-remaining']
-        bugs = json.loads(content)
+        bugs = self.__fetch_data(url)
 
         return bugs
 
     def __get_batch_bugs(self):
-        if self.bugs_state == OPEN_STATE:
-            bugs = self.__get_batch_bugs_state(state=OPEN_STATE,
-                                               since=self.mod_date_open)
-            if len(bugs) == 0:
-                self.bugs_state = CLOSED_STATE
-                self.pagecont = 1
-        if self.bugs_state == CLOSED_STATE:
-            bugs = self.__get_batch_bugs_state(state=CLOSED_STATE,
-                                               since=self.mod_date_closed)
+        direction = 'asc'
+
+        if self.newest_first:
+            direction = 'desc'
+
+        bugs = self.__get_batch_bugs_state(state=ALL_STATES,
+                                           since=self.mod_date,
+                                           direction=direction)
         return bugs
 
     def run(self):
@@ -570,28 +580,26 @@ class GithubBackend(Backend):
         trk = Tracker(url, "github", "v3")
         dbtrk = bugsdb.insert_tracker(trk)
 
-        self.bugs_state = "open"
+        self.bugs_state = ALL_STATES
         self.pagecont = 1
+        self.mod_date = None
 
-        self.mod_date_open = None
-        self.mod_date_closed = None
+        aux_date = bugsdb.get_last_modification_date(tracker_id=dbtrk.id)
 
-        aux_date_open = bugsdb.get_last_modification_date(state="open",
-                                                          tracker_id=dbtrk.id)
-        if aux_date_open:
-            self.mod_date_open = aux_date_open.isoformat()
-        aux_date_closed = bugsdb.get_last_modification_date(state="closed",
-                                                            tracker_id=dbtrk.id)
-        if aux_date_closed:
-            self.mod_date_closed = aux_date_closed.isoformat()
+        if aux_date:
+            self.mod_date = aux_date.isoformat()
+            printdbg("Last issue already cached: %s" % self.mod_date)
 
-        printdbg("Last open bug already cached: %s" % self.mod_date_open)
-        printdbg("Last closed bug already cached: %s" % self.mod_date_closed)
-        bugs = self.__get_batch_bugs()
+        try:
+            bugs = self.__get_batch_bugs()
+        except GitHubRateLimitReached:
+            printout("GitHub rate limit reached. To resume, wait some minutes.")
+            sys.exit(0)
+
         nbugs = len(bugs)
 
         if len(bugs) == 0:
-            if aux_date_open or aux_date_closed:
+            if aux_date:
                 printout("Bicho database up to date")
             else:
                 printout("No bugs found. Did you provide the correct url?")
@@ -601,13 +609,15 @@ class GithubBackend(Backend):
         while len(bugs) > 0:
 
             for bug in bugs:
-
                 try:
                     issue_data = self.analyze_bug(bug)
+                except GitHubRateLimitReached:
+                    printout("GitHub rate limit reached. To resume, wait some minutes.")
+                    sys.exit(0)
                 except Exception:
                     #FIXME it does not handle the e
-                    printerr("Error in function analyzeBug with URL: ' \
-                    '%s and Bug: %s" % (url, bug))
+                    msg = "Error in function analyzeBug with URL: %s and bug: %s" % (url, bug)
+                    printerr(msg)
                     raise
 
                 try:
@@ -630,7 +640,13 @@ class GithubBackend(Backend):
                 time.sleep(self.delay)
 
             self.pagecont += 1
-            bugs = self.__get_batch_bugs()
+
+            try:
+                bugs = self.__get_batch_bugs()
+            except GitHubRateLimitReached:
+                printout("GitHub rate limit reached. To resume, wait some minutes.")
+                sys.exit(0)
+
             nbugs = nbugs + len(bugs)
 
         #end while

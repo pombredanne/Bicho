@@ -25,7 +25,6 @@ from backends import Backend
 import info
 from argparse import ArgumentParser
 import os
-import sys
 from urllib2 import Request, urlopen, urlparse, URLError, HTTPError
 
 # 500 is the max recommend by bugmaster@gnome.org.
@@ -124,16 +123,40 @@ class Config():
         check_url = urlparse.urljoin(url.scheme + '://' + url.netloc, '')
         print("Checking URL: " + check_url)
         req = Request(check_url)
-        try:
-            response = urlopen(req)
-        except HTTPError, e:
-            raise InvalidConfig('The server could not fulfill the request '
-                                + str(e.msg) + '(' + str(e.code) + ')')
-        except URLError, e:
-            raise InvalidConfig('We failed to reach a server. ' + str(e.reason))
 
-        except ValueError, e:
-            print("Not an URL: " + Config.url)
+        if Config.backend != 'github':
+            try:
+                response = urlopen(req)
+            except HTTPError, e:
+                raise InvalidConfig('The server could not fulfill the request '
+                                    + str(e.msg) + '(' + str(e.code) + ')')
+            except URLError, e:
+                raise InvalidConfig('We failed to reach a server. ' + str(e.reason))
+            except ValueError, e:
+                print("Not an URL: " + Config.url)
+
+        if Config.backend == 'maniphest':
+            start_from = getattr(Config, 'start_from', None)
+            from_id = getattr(Config, 'from_id', None)
+
+            if start_from:
+                try:
+                    from dateutil import parser
+                    parser.parse(start_from)
+                except:
+                    msg = "Date format error on start-from argument: %s" % start_from
+                    raise ErrorLoadingConfig(msg)
+            else:
+                Config.start_from = None
+
+            if from_id:
+                try:
+                    Config.from_id = int(from_id)
+                except:
+                    msg = "Invalid issue id: %s" % from_id
+                    raise ErrorLoadingConfig(msg)
+            else:
+                Config.from_id = None
 
         if getattr(Config, 'input', None) == 'db':
             Config.check_params(['db_driver_in', 'db_user_in',
@@ -182,6 +205,8 @@ class Config():
                             help='Backend user', default=None)
         parser.add_argument('--backend-password', dest='backend_password',
                             help='Backend password', default=None)
+        parser.add_argument('--backend-token', dest='backend_token',
+                            help='Backend authentication token', default=None)
         parser.add_argument('-c', '--cfg', dest='cfgfile',
                             help='Use a custom configuration file', default=None)
         parser.add_argument('-d', '--delay', type=int, dest='delay',
@@ -247,6 +272,22 @@ class Config():
                            default=None)
         group.add_argument('--db-database-in', dest='db_database_in',
                            help='Input database name', default=None)
+
+        # GitHub options
+        group = parser.add_argument_group('GitHub specific options')
+        group.add_argument('--newest-first', action='store_true', dest='newest_first',
+                           help='Fetch newest issues first', default=False)
+
+        # Maniphest options
+        group = parser.add_mutually_exclusive_group()
+        group.add_argument('--no-resume', action='store_true', dest='no_resume',
+                           help='Disable resume mode (only on maniphest)', default=False)
+        group.add_argument('--start-from', dest='start_from',
+                           help='Do not retrieve issues after this date (only on maniphest)',
+                           default=None)
+        group.add_argument('--from-id', dest='from_id',
+                           help='Retrieve issues in sequence from the given id (only on maniphest)',
+                           default=None)
 
         args = parser.parse_args()
 

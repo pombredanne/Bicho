@@ -178,6 +178,9 @@ class Gerrit():
     Gerrit backend
     """
 
+    MAX_SSH_RETRIES = 5
+    MIN_SSH_WAIT_SECS = 5
+
     project_test_file = None
     safe_delay = 5
 
@@ -439,6 +442,7 @@ class Gerrit():
             elif (UPLOAD_REGEXP_1.match(comment["message"])):
                 patchset = comment["message"].split(" ")[3]
                 patchset = patchset.split(".")[0]
+                patchset = patchset.replace(":", "")
             else:
                 continue
             # Sometimes we get more than one Verfieid for the same patch
@@ -474,7 +478,7 @@ class Gerrit():
                 abandoned = True
                 by_abandoned = by
                 date_abandoned = self._convert_to_datetime(comment["timestamp"])
-            elif (RESTORED_REGEXP_1.match(comment["message"]) or 
+            elif (RESTORED_REGEXP_1.match(comment["message"]) or
                    RESTORED_REGEXP_2.match(comment["message"])):
                 abandoned = False
 
@@ -483,14 +487,43 @@ class Gerrit():
                             unicode("ABANDONED"), by_abandoned, date_abandoned)
             issue.add_change(change)
 
+    def getVersion(self):
+        args_gerrit = "gerrit version"
 
-    def getReviews(self, limit, start):
+        if 'backend_user' in vars(Config):
+            cmd = ["ssh", "-p 29418", Config.backend_user + "@" + Config.url, args_gerrit]
+            printdbg("Gerrit cmd: " + "ssh -p 29418 " + Config.backend_user + "@" + Config.url + " " + args_gerrit)
+        else:
+            cmd = ["ssh", "-p 29418", Config.url, args_gerrit]
+            printdbg("Gerrit cmd: " + "ssh " + "-p 29418 " + Config.url + " " + args_gerrit)
 
+        version_raw = self.run_ssh_command(cmd)
+
+        # output: gerrit version 2.10-rc1-988-g333a9dd
+        m = re.match("gerrit version (\d+)\.(\d+).*", version_raw)
+
+        if not m:
+            raise Exception("Invalid gerrit version %s" % version_raw)
+
+        try:
+            mayor = int(m.group(1))
+            minor = int(m.group(2))
+        except Exception, e:
+            raise Exception("Invalid gerrit version %s. Error: %s" % (version_raw, str(e)))
+
+        return mayor, minor
+
+    def getReviews(self, limit, start, version_mayor, version_minor):
         args_gerrit = "gerrit query "
         args_gerrit += "project:" + Config.gerrit_project
         args_gerrit += " limit:" + str(limit)
-        if (start != ""):
-            args_gerrit += " resume_sortkey:" + start
+
+        if start:
+            if version_mayor == 2 and version_minor >= 9:
+                args_gerrit += " --start=" + str(start)
+            else:
+                args_gerrit += " resume_sortkey:" + start
+
         # --patch-sets --submit
         args_gerrit += " --all-approvals --comments --format=JSON"
 
@@ -500,7 +533,9 @@ class Gerrit():
         else:
             cmd = ["ssh", "-p 29418", Config.url, args_gerrit]
             printdbg("Gerrit cmd: " + "ssh " + "-p 29418 " + Config.url + " " + args_gerrit)
-        tickets_raw = subprocess.check_output(cmd)
+
+        tickets_raw = self.run_ssh_command(cmd)
+
         # tickets_raw = open('./tickets.json', 'r').read()
         tickets_raw = "[" + tickets_raw.replace("\n", ",") + "]"
         tickets_raw = tickets_raw.replace(",]", "]")
@@ -513,6 +548,27 @@ class Gerrit():
 #        tickets = json.loads(tickets_test)
 
         return tickets
+
+    def run_ssh_command(self, cmd):
+        retries = 0
+        wait = self.MIN_SSH_WAIT_SECS
+
+        while True:
+            try:
+                output = subprocess.check_output(cmd)
+                return output
+            except subprocess.CalledProcessError, e:
+                printdbg("Command failded. code: %s, output: %s" % (e.returncode, e.output))
+
+                if retries == self.MAX_SSH_RETRIES:
+                    printdbg("Aborting. Max retriying times excedeed")
+                    raise
+
+                printdbg("Retriying in %s seconds" % str(wait))
+                time.sleep(wait)
+
+                retries += 1
+                wait = wait * 2
 
     def run(self):
         """
@@ -527,6 +583,9 @@ class Gerrit():
         trk = Tracker(Config.url + "_" + Config.gerrit_project, "gerrit", "beta")
         dbtrk = bugsdb.insert_tracker(trk)
 
+        mayor, minor = self.getVersion()
+        printdbg("Gerrit version: %s.%s" % (str(mayor), str(minor)))
+
         last_mod_time = 0
         last_mod_date = bugsdb.get_last_modification_date(tracker_id=dbtrk.id)
         if last_mod_date:
@@ -535,20 +594,31 @@ class Gerrit():
             last_mod_time = time.mktime(time.strptime(last_mod_date, '%Y-%m-%d %H:%M:%S'))
 
         limit = 500  # gerrit default 500
-        last_item = ""
-        # last_item = "001f672c00002f80";
-        number_results = limit
         total_reviews = 0
+
+        if mayor == 2 and minor >= 9:
+            last_item = 0
+        else:
+            last_item = ""
+
+        number_results = limit
 
         while (number_results == limit or
                number_results == limit + 1):  # wikimedia gerrit returns limit+1
             # ordered by lastUpdated
-            tickets = self.getReviews(limit, last_item)
+            time.sleep(self.delay)
+            tickets = self.getReviews(limit, last_item, mayor, minor)
             number_results = 0
 
             reviews = []
             for entry in tickets:
                 if 'project' in entry.keys():
+                    if mayor == 2 and minor >= 9:
+                        last_item += 1
+                    else:
+                        # last_item = "001f672c00002f80";
+                        last_item = entry['sortKey']
+
                     if (entry['lastUpdated'] < last_mod_time):
                         break
                     reviews.append(entry["number"])
@@ -558,7 +628,6 @@ class Gerrit():
                         pprint.pprint("ERROR in review. Ignoring it.")
                         continue
 
-                    last_item = entry['sortKey']
                     # extra changes not included in gerrit changes
                     # self.add_merged_abandoned_changes_from_comments(entry, review_data)
                     self.add_merged_abandoned_changes(entry, review_data)
@@ -568,7 +637,7 @@ class Gerrit():
                     number_results += 1
                 elif 'rowCount' in entry.keys():
                     pprint.pprint(entry)
-                    printdbg("CONTINUE FROM: " + last_item)
+                    printdbg("CONTINUE FROM: " + str(last_item))
             total_reviews = total_reviews + int(number_results)
         self.check_merged_abandoned_changes(bugsdb.store, dbtrk.id)
 

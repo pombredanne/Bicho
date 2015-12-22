@@ -23,7 +23,7 @@ from bicho.config import Config
 
 from bicho.backends import Backend
 from bicho.utils import create_dir, printdbg, printout, printerr
-from bicho.db.database import DBIssue, DBBackend, get_database
+from bicho.db.database import DBIssue, DBChange, DBPeople, DBBackend, get_database
 from bicho.common import Tracker, Issue, People, Change
 
 from dateutil.parser import parse
@@ -44,6 +44,41 @@ import urllib
 
 from storm.locals import DateTime, Desc, Int, Reference, Unicode, Bool
 
+
+class DBStoryBoardStory(object):
+    __storm_table__ = 'stories'
+
+    story_id = Int(primary=True)
+    created_at = DateTime()
+    updated_at = DateTime()
+    status = Unicode()
+    description = Unicode()
+    title = Unicode()
+    tags = Unicode()
+    creator_id = Int()
+    is_bug = Bool()
+
+    def __init__(self, story_id):
+        self.story_id = story_id
+
+class DBStoryBoardStoryMySQL(DBStoryBoardStory):
+    """
+    MySQL subclass of L{DBStoryBoardIssueExt}
+    """
+
+    # If the table is changed you need to remove old from database
+    __sql_table__ = 'CREATE TABLE IF NOT EXISTS stories ( \
+                    story_id INTEGER NOT NULL, \
+                    created_at DATETIME, \
+                    updated_at DATETIME, \
+                    status VARCHAR(255), \
+                    creator_id INTEGER NOT NULL, \
+                    is_bug BOOLEAN, \
+                    title TEXT, \
+                    description TEXT, \
+                    tags TEXT, \
+                    PRIMARY KEY(story_id) \
+                     ) ENGINE=MYISAM;'
 
 class DBStoryBoardIssueExt(object):
     __storm_table__ = 'issues_ext_storyboard'
@@ -84,7 +119,37 @@ class DBStoryBoardBackend(DBBackend):
     Adapter for StoryBoard backend.
     """
     def __init__(self):
-        self.MYSQL_EXT = [DBStoryBoardIssueExtMySQL]
+        self.MYSQL_EXT = [DBStoryBoardIssueExtMySQL,DBStoryBoardStoryMySQL]
+
+    def insert_story(self, store, story):
+        newStory = False
+        try:
+            db_story = store.find(DBStoryBoardStory,
+                                  DBStoryBoardStory.story_id == story['id']).one()
+            if not db_story:
+                newStory = True
+                db_story = DBStoryBoardStory(story['id'])
+
+            db_story.updated_at = StoryBoard.convert_to_datetime(story['updated_at'])
+            db_story.created_at = StoryBoard.convert_to_datetime(story['created_at'])
+            db_story.status = story['status']
+            if story['creator_id']:
+                db_story.creator_id = story['creator_id']
+            else:
+                db_story.creator_id = -1
+            db_story.is_bug = story['is_bug']
+            db_story.description = story['description']
+            db_story.title = story['title']
+            db_story.tags = unicode(";".join(story['tags']))
+
+            if newStory is True:
+                store.add(db_story)
+
+            store.flush()
+            return db_story
+        except:
+            store.rollback()
+            raise
 
     def insert_issue_ext(self, store, issue, issue_id):
         """
@@ -169,7 +234,8 @@ class StoryBoard():
     def __init__(self):
         self.delay = Config.delay
 
-    def _convert_to_datetime(self, str_date):
+    @staticmethod
+    def convert_to_datetime(str_date):
         """
         Returns datetime object from string
         """
@@ -188,7 +254,7 @@ class StoryBoard():
         description = None
         created_at = None
         if task["created_at"] is not None:
-            created_at = self._convert_to_datetime(task["created_at"])
+            created_at = StoryBoard.convert_to_datetime(task["created_at"])
 
         issue = StoryBoardIssue(task["id"],
                             "task",
@@ -211,7 +277,7 @@ class StoryBoard():
             issue.project_id = task["project_id"]
         issue.story_id = task["story_id"]
         if task["updated_at"] is not None:
-            issue.mod_date = self._convert_to_datetime(task["updated_at"])
+            issue.mod_date = StoryBoard.convert_to_datetime(task["updated_at"])
 
         return issue
 
@@ -311,9 +377,40 @@ class StoryBoard():
 
         logging.info("Done. Tasks analyzed:" + str(total_tasks - remaining))
 
-    def analyze_stories_events(self):
+
+    def check_tasks_events (self):
+        """ Add event/invalid changes if don't exists and task in this status """
+        by = People('bicho_tool')
+        # TODO: at some point this should be NULL
+        by.set_name('Unknown')
+
+        issues = self.bugsdb.store.find(DBIssue)
+        people_none = self.bugsdb.store.find(DBPeople, DBPeople.user_id == unicode("None")).one()
+        for task in issues:
+            if task.status in ['merged','invalid']:
+                # Closed condition that needs and event for it
+                changes = self.bugsdb.store.find(DBChange, DBChange.issue_id == task.id)
+                found_change = False
+                for change in changes:
+                    if change.new_value == task.status:
+                        found_change = True
+                        break
+                if not found_change:
+                    task_ext = self.bugsdb.store.find(DBStoryBoardIssueExt,
+                                                      DBStoryBoardIssueExt.issue_id == task.id).one()
+                    field = "task_status_changed"
+                    old_value = None
+                    if task_ext.mod_date == None:
+                        # Can't generate the event without date
+                        continue
+                    # logging.info("Adding to " + task.summary + " " + task.status + " event")
+                    change = Change(field, old_value, task.status, by, task_ext.mod_date)
+                    self.bugsdb._insert_change(change, task.id, self.dbtrk.id)
+
+    def analyze_stories_and_events(self):
         # The changes in tasks is in stories events
-        # Get all stories updated after last analysis and review their changes
+        # Get all stories updated after last analysis store them
+        # and review their changes
         self.url_stories = Config.url + "/api/v1/stories"
         self.url_stories += "?sort_field=updated_at&sort_dir=desc"
         self.url_stories_total = self.url_stories + "&limit=1"
@@ -355,12 +452,15 @@ class StoryBoard():
                     last_date_shown = parse(self.last_mod_date).replace(tzinfo=None)
                     if story_date > last_date_shown:
                         storiesUpdated.append(story['id'])
+                        self.backend.insert_story(self.bugsdb.store, story)
                     else:
                         logging.info("First story updated before " + self.last_mod_date)
-                        logging.info(story['updated_at']+" "+story['title'])
+                        logging.info("No updates from " + story['updated_at']+" "+story['title'])
                         updated_stories = False
                         break
-                else: storiesUpdated.append(story['id'])
+                else:
+                    storiesUpdated.append(story['id'])
+                    self.backend.insert_story(self.bugsdb.store, story)
                 marker = story['id']
                 remaining -= 1
 
@@ -380,19 +480,26 @@ class StoryBoard():
         for story_id in storiesUpdated:
             url_events = Config.url + "/api/v1/stories/" + str(story_id) + "/events"
             f = urllib.urlopen(url_events)
-            print (url_events)
             data = f.read()
             events = json.loads(data)
+
             for event in events:
-                # Hack: event_info not provided in API as a JSON object
                 if event['event_info'] is None: continue
+                # Hack: event_info not provided in API as a JSON object. Convert it to JSON.
                 event['event_info'] = json.loads(event['event_info'])
                 if 'task_id' in event['event_info'].keys():
                     task_id = event['event_info']['task_id']
+                    issue = self.bugsdb.store.find(DBIssue, DBIssue.issue == unicode(task_id)).one()
+                    if issue is None:
+                        logging.error("Task " + str(task_id) + " found in event but does not exists")
+                        logging.info(event)
+                        continue
                     change = self.parse_change(event)
-                    db_change = self.bugsdb._get_db_change(change, task_id, self.dbtrk.id)
+                    db_change = self.bugsdb._get_db_change(change, issue.id, self.dbtrk.id)
                     if db_change == -1:
-                        self.bugsdb._insert_change(change, task_id, self.dbtrk.id)
+                        self.bugsdb._insert_change(change, issue.id, self.dbtrk.id)
+
+
             remaining -= 1
             if remaining % 100 == 0: logging.info("Remaining: " + str(remaining))
             f.close()
@@ -436,10 +543,11 @@ class StoryBoard():
 
             f = urllib.urlopen(self.url_users_page)
             userList = json.loads(f.read())
+            marker = userList[-1]['id']
+            start_page += 1
 
             self.all_users += userList
 
-            start_page += 1
 
         logging.info("Done user gathering")
 
@@ -453,9 +561,9 @@ class StoryBoard():
         self.items_per_query = 500 # max limit by default in https://storyboard.openstack.org/api/v1/
         if (self.debug): self.items_per_query = 10 # debug
 
-        self.bugsdb = get_database(DBStoryBoardBackend())
+        self.backend = DBStoryBoardBackend()
+        self.bugsdb = get_database(self.backend)
 
-        # still useless in storyboard
         self.bugsdb.insert_supported_traker("storyboard", "beta")
         trk = Tracker(Config.url, "storyboard", "beta")
         self.dbtrk = self.bugsdb.insert_tracker(trk)
@@ -467,6 +575,7 @@ class StoryBoard():
 
         self.analyze_users()
         self.analyze_tasks()
-        self.analyze_stories_events()
+        self.analyze_stories_and_events()
+        self.check_tasks_events()
 
 Backend.register_backend('storyboard', StoryBoard)
